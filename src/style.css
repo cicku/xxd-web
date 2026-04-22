@@ -1,0 +1,116 @@
+* { margin: 0; padding: 0; box-sizing: border-box }
+body {
+  background: #0a0a0a;
+  color: #e0e0e0;
+  font-family: 'SF Mono', 'Fira Code', Consolas, monospace;
+  padding: 2rem;
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+h1 {
+  color: #ccc;
+  margin-bottom: 1rem;
+  font-size: 1.4rem;
+  text-align: center;
+}
+h1 a          { color: #f38020; text-decoration: none }
+h1 a:hover    { text-decoration: underline }
+#status {
+  color: #888;
+  margin-bottom: 1rem;
+}
+#terminal {
+  background: #111;
+  border: 1px solid #333;
+  border-radius: 8px;
+  padding: 1rem;
+  min-height: 300px;
+  max-height: 80vh;
+  overflow-y: auto;
+  overflow-x: auto;
+  font-size: .85rem;
+  line-height: 1.4;
+  width: min(780px, 95%);
+  box-sizing: border-box;
+}
+#terminal pre {
+  margin: 0;
+  font-family: inherit;
+  white-space: pre;
+}
+
+.step    { color: #aaa; font-weight: bold }
+.stdout  { color: #ddd }
+.stderr  { color: #888 }
+.error   { color: #ef4444 }
+.done    { color: #fff; font-weight: bold; font-size: 1.1rem }
+.result {
+  background: #1a1a1a;
+  padding: .5rem 1rem;
+  border-radius: 4px;
+  margin-top: .5rem;
+  border-left: 3px solid #888;
+}
+.form-row {
+  display: flex;
+  align-items: center;
+  gap: .5rem;
+  margin-bottom: .75rem;
+  width: min(780px, 95%);
+}
+.form-row label { color: #ccc; font-size: .85rem; white-space: nowrap }
+.form-row input[type="url"] { flex: 1; margin-bottom: 0 }
+/* Match the input's geometry so the button is exactly the same height:
+   same vertical padding + font-size + 1px border (transparent on the button). */
+.form-row button {
+  padding: .5rem .75rem;
+  font-size: .85rem;
+  border: 1px solid transparent;
+  margin-bottom: 0;
+}
+
+input[type="url"] {
+  background: #111;
+  color: #e0e0e0;
+  border: 1px solid #333;
+  border-radius: 4px;
+  padding: .5rem .75rem;
+  font-family: inherit;
+  font-size: .85rem;
+  width: min(600px, 90%);
+  margin-bottom: .75rem;
+}
+input[type="url"]:focus   { outline: none; border-color: #888 }
+input[type="url"].invalid { animation: flashRed .25s ease-in-out 3 }
+@keyframes flashRed {
+  0%, 100% { border-color: #ef4444; box-shadow: 0 0 6px #ef4444 }
+  50%      { border-color: #333;    box-shadow: none }
+}
+
+button {
+  background: #ccc;
+  color: #000;
+  border: none;
+  padding: .6rem 1.2rem;
+  border-radius: 4px;
+  cursor: pointer;
+  font-family: inherit;
+  font-weight: bold;
+  margin-bottom: 1rem;
+}
+button:hover    { background: #eee }
+button:disabled { background: #555; cursor: not-allowed }
+
+footer {
+  color: #555;
+  font-size: .75rem;
+  margin-top: .5rem;
+  width: min(780px, 95%);  /* match .form-row / #terminal so both edges align */
+  display: flex;
+  justify-content: space-between;
+}
+#appV {
+  color: #444;
+}

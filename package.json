@@ -1,0 +1,15 @@
+{
+  "name": "xxd-web",
+  "version": "1.7",
+  "private": true,
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy --tag v$npm_package_version"
+  },
+  "dependencies": {
+    "@cloudflare/containers": "^0.3.0"
+  },
+  "devDependencies": {
+    "wrangler": "^4.83.0"
+  }
+}

@@ -1,0 +1,57 @@
+{
+  "name": "xxd-web",
+  "main": "src/xxd.js",
+  "compatibility_date": "2025-04-14",
+  "account_id": "b12e3b2192ee5588fdad995178a03e26",
+
+  "containers": [
+    {
+      "class_name": "Xxd",
+      "image": "./Dockerfile",
+      "instance_type": "standard-3",
+      "max_instances": 20
+    }
+  ],
+
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "XXD",
+        "class_name": "Xxd"
+      }
+    ]
+  },
+
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["Xxd"]
+    }
+  ],
+
+  "version_metadata": {
+    "binding": "XXD_VERSION_METADATA"
+  },
+
+  // Rate-limit counters per (ip, ja4, url) — 3 submissions / 10 minutes.
+  "kv_namespaces": [
+    { "binding": "XXD_RL", "id": "ac18576ba5fe43438f61038aad22f6b6" }
+  ],
+
+  "observability": {
+    "enabled": true,
+    "logs": { "enabled": true },
+    "head_sampling_rate": 1
+  },
+
+  "workers_dev": true,
+  "preview_urls": false,
+
+  "routes": [
+    { "pattern": "demo.cicku.me/xxd*", "zone_name": "cicku.me" }
+  ],
+
+  "rules": [
+    { "type": "Text", "globs": ["**/*.html", "**/*.css", "**/*.js.txt"], "fallthrough": false }
+  ]
+}

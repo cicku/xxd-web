@@ -1,0 +1,323 @@
+// Copyright (c) 2026 Christopher Meng
+// This Source Code Form is subject to the terms of the Mozilla Public
+// License, v. 2.0. If a copy of the MPL was not distributed with this
+// file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
+var terminal = document.getElementById('terminal');
+var status   = document.getElementById('status');
+var btn      = document.getElementById('btn');
+var urlInput = document.getElementById('urlInput');
+
+var scrollRAF    = null;
+var activeWs     = null;
+var retryCount   = 0;
+var MAX_RETRIES  = 2;
+var lastUrl      = '';
+// Most-recently appended step line, so 'step-update' patches it in O(1)
+// instead of re-running a :last-of-type CSS selector against the whole log.
+var lastStepEl   = null;
+// Hard cap on visible <pre> lines. Matches the server-side MAX_LOG so a
+// noisy run (pv progress, 10k-entry tarball) doesn't bog the renderer down.
+var MAX_LINES    = 5000;
+
+// Terminal state machine. Drives control flow (reconnect? reuse WS? show
+// "Run again?") — separate from status.textContent which is just a label for
+// the user. Values: idle | running | done | error | disconnected | reloading.
+var termState = 'idle';
+function setState(s, label) {
+  termState = s;
+  if (label !== undefined) status.textContent = label;
+}
+
+// Version the page booted with. On reconnect we compare against /version and
+// reload on mismatch so a new deploy always gets a fresh container.
+var bootVid = (document.querySelector('meta[name="xxd-vid"]') || {}).content || '';
+
+// Keep the Run button in sync with the URL input: disabled while empty.
+function syncBtn() { btn.disabled = !urlInput.value.trim(); }
+urlInput.addEventListener('input', syncBtn);
+syncBtn();
+
+// If the previous page detected a version bump and reloaded, pick up the URL
+// it stashed and kick the job off again.
+(function resumeAfterVersionBump() {
+  var pending = sessionStorage.getItem('xxd-resubmit');
+  if (!pending) return;
+  sessionStorage.removeItem('xxd-resubmit');
+  console.log('[xxd] resuming after version bump, url=', pending, 'bootVid=', bootVid);
+  urlInput.value = pending;
+  syncBtn();
+  appendLine('step', '\u25b6 Resuming on fresh container (build ' +
+    (bootVid ? bootVid.slice(0, 7) : '?') + ') with the previous URL', true);
+  setTimeout(start, 50);
+})();
+
+// Render an ISO timestamp as "<relative> (local HH:MM:SS)".
+function formatDeploy(iso) {
+  var t = Date.parse(iso);
+  if (isNaN(t)) return iso;
+  var s = Math.max(0, Math.round((Date.now() - t) / 1000));
+  var rel = s < 60    ? s + 's ago'
+          : s < 3600  ? Math.round(s / 60) + 'm ago'
+          : s < 86400 ? Math.round(s / 3600) + 'h ago'
+          :             Math.round(s / 86400) + 'd ago';
+  return rel + ' (' + new Date(t).toLocaleTimeString() + ')';
+}
+
+// Standard + bright ANSI palette (indices 0–15)
+var ANSI_COLORS = [
+  '#000','#a00','#0a0','#a50','#00a','#a0a','#0aa','#aaa',
+  '#555','#f55','#5f5','#ff5','#55f','#f5f','#5ff','#fff'
+];
+
+// 256-color lookup: 0–15 palette, 16–231 color cube, 232–255 grayscale
+function ansi256(n) {
+  if (n < 16) return ANSI_COLORS[n];
+  if (n >= 232) {
+    var v = 8 + (n - 232) * 10;
+    return 'rgb(' + v + ',' + v + ',' + v + ')';
+  }
+  n -= 16;
+  var r = Math.floor(n / 36);
+  var g = Math.floor((n % 36) / 6);
+  var b = n % 6;
+  return 'rgb(' + (r ? r*40+55 : 0) + ',' + (g ? g*40+55 : 0) + ',' + (b ? b*40+55 : 0) + ')';
+}
+
+// Turn ANSI SGR sequences into <span style="..."> for colored terminal output.
+// Styles accumulate across consecutive escapes (bold + color, etc.) until a reset.
+function colorfulTerm(str) {
+  str = str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  var bold = false, color = '';
+  var open = false;
+
+  var result = str.replace(/\x1b\[([0-9;]*)m/g, function(_, codes) {
+    var parts = codes ? codes.split(';').map(Number) : [0];
+    for (var i = 0; i < parts.length; i++) {
+      var c = parts[i];
+      if (c === 0)                { bold = false; color = ''; }
+      else if (c === 1)             bold = true;
+      else if (c >= 30 && c <= 37)  color = 'color:' + ANSI_COLORS[c - 30] + ';';
+      else if (c >= 90 && c <= 97)  color = 'color:' + ANSI_COLORS[c - 82] + ';';
+      else if (c === 38 && parts[i+1] === 5) { color = 'color:' + ansi256(parts[i+2]) + ';'; i += 2; }
+      else if (c === 38 && parts[i+1] === 2) { color = 'color:rgb(' + parts[i+2] + ',' + parts[i+3] + ',' + parts[i+4] + ');'; i += 4; }
+    }
+    var close = open ? '</span>' : '';
+    var style = (bold ? 'font-weight:bold;' : '') + color;
+    if (!style) { open = false; return close; }
+    open = true;
+    return close + '<span style="' + style + '">';
+  });
+  return open ? result + '</span>' : result;
+}
+
+function appendLine(cls, text, ansi) {
+  var el = document.createElement('pre');
+  el.className = cls;
+  if (ansi) el.innerHTML = colorfulTerm(text);
+  else el.textContent = text;
+  terminal.appendChild(el);
+  if (cls === 'step') lastStepEl = el;
+  // Evict oldest nodes once we exceed the cap. If we'd evict the tracked
+  // step element, drop the handle so step-update becomes a no-op until the
+  // next real step arrives.
+  while (terminal.childElementCount > MAX_LINES) {
+    var first = terminal.firstElementChild;
+    if (first === lastStepEl) lastStepEl = null;
+    first.remove();
+  }
+  if (!scrollRAF) {
+    scrollRAF = requestAnimationFrame(function() {
+      terminal.scrollTop = terminal.scrollHeight;
+      scrollRAF = null;
+    });
+  }
+}
+
+function resetUI() {
+  terminal.innerHTML = '';
+  lastStepEl = null;
+  btn.disabled = true;
+}
+
+function connect() {
+  var proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  var ws = new WebSocket(proto + '//' + location.host + '/xxd/ws');
+  activeWs = ws;
+
+  ws.onopen = function() {
+    retryCount = 0;
+    setState('running', 'Connected \u2014 loading xxd...');
+    ws.send(JSON.stringify({ type: 'start', url: urlInput.value }));
+  };
+
+  ws.onmessage = function(e) {
+    var msg = JSON.parse(e.data);
+    switch (msg.type) {
+      case 'step':
+        appendLine('step', '\u25b6 ' + msg.label, true);
+        setState('running', msg.label);
+        break;
+      case 'step-update':
+        if (lastStepEl) lastStepEl.textContent = '\u25b6 ' + msg.label;
+        setState('running', msg.label);
+        break;
+      case 'truncated':
+        appendLine('stderr', '(\u2026 ' + msg.dropped + ' earlier line(s) trimmed from replay)');
+        break;
+      case 'stdout':
+        appendLine('stdout', msg.data, true);
+        break;
+      case 'xxd-line':
+        appendLine('stdout', msg.data, true);
+        break;
+      case 'stderr':
+        appendLine('stderr', msg.data, true);
+        break;
+      case 'status':
+        if (msg.state === 'running') {
+          appendLine('step', '\u25b6 Job started at ' + new Date(msg.startedAt).toLocaleString() + ' \u2014 still running');
+          setState('running', 'Reconnected \u2014 job in progress');
+        }
+        break;
+      case 'ping':
+        break;
+      case 'error':
+        appendLine('error', '\u2717 ' + msg.message, true);
+        setState('error', 'Error');
+        btn.disabled = false;
+        btn.textContent = 'Run again\u2753';
+        break;
+      case 'done':
+        appendLine('done', '\u2713 xxd complete', true);
+        setState('done', 'Done');
+        btn.disabled = false;
+        btn.textContent = 'Run again\u2753';
+        break;
+    }
+  };
+
+  ws.onerror = function() {
+    // onerror is always followed by onclose, so let onclose handle retry
+  };
+
+  ws.onclose = function() {
+    activeWs = null;
+    // Terminal states — no reconnect, the job's lifecycle is over.
+    if (termState === 'done' || termState === 'error') return;
+
+    // If the Worker was redeployed while we were connected, the existing DO
+    // may still be holding the old container. Drop our sid cookie and reload
+    // so we reshard onto a fresh DO + fresh container image.
+    fetch('/xxd/version?boot=' + encodeURIComponent(bootVid), { cache: 'no-store' })
+      .then(function(r) { return r.json(); })
+      .then(function(v) {
+        var bumped = !!(v.id && bootVid && v.id !== bootVid);
+        var short  = v.tag || (v.id || '?').slice(0, 7);
+        var depAt  = v.timestamp ? ' deployed ' + formatDeploy(v.timestamp) : '';
+        console.log('[xxd] ws closed, version check:',
+          { boot: bootVid, current: v.id, tag: v.tag, timestamp: v.timestamp, bumped: bumped });
+        if (bumped) {
+          appendLine('step', '\u25b6 Worker redeployed (' + bootVid.slice(0, 7) +
+            ' \u2192 ' + short + ')' + depAt + ' \u2014 reloading onto a fresh container', true);
+          if (lastUrl) sessionStorage.setItem('xxd-resubmit', lastUrl);
+          setState('reloading', 'Worker updated \u2014 reloading...');
+          // /reset clears the HttpOnly sid cookie server-side; the reload then
+          // mints a fresh nonce.sid, which reshards onto a different DO.
+          fetch('/xxd/reset').finally(function() { location.reload(); });
+          return;
+        }
+        appendLine('stderr', 'Worker version unchanged (' + short + ')' + depAt +
+          ' \u2014 reconnecting to the same container');
+        scheduleRetry();
+      })
+      .catch(function(err) {
+        console.log('[xxd] ws closed, version probe failed:', err && err.message);
+        appendLine('stderr', 'Version check failed (' +
+          ((err && err.message) || 'network') + ') \u2014 reconnecting anyway');
+        scheduleRetry();
+      });
+  };
+}
+
+function scheduleRetry() {
+  retryCount++;
+  if (retryCount <= MAX_RETRIES) {
+    appendLine('stderr', 'Connection lost \u2014 reconnecting in 15s (attempt ' + retryCount + '/' + MAX_RETRIES + ')');
+    // Stay in 'running' — reconnection is part of the same active job, so
+    // onclose's terminal-state guard won't fire on a subsequent drop.
+    setState('running', 'Reconnecting in 15s...');
+    btn.disabled = true;
+    setTimeout(function() { connect(); }, 15000);
+  } else {
+    appendLine('error', '\u2717 Could not reconnect \u2014 please refresh the page');
+    setState('disconnected', 'Disconnected');
+  }
+}
+
+function flashInvalid() {
+  urlInput.classList.remove('invalid');
+  void urlInput.offsetWidth; // force reflow so the animation re-triggers
+  urlInput.classList.add('invalid');
+}
+urlInput.addEventListener('animationend', function() {
+  urlInput.classList.remove('invalid');
+});
+
+function start() {
+  var url = urlInput.value.trim();
+  if (!/^https?:\/\/\S+/i.test(url)) {
+    // Stay in whatever state we were in; this is a client-side validation
+    // bounce and no job has started yet.
+    status.textContent = 'Invalid URL \u2014 please enter a valid http(s) URL and try again';
+    flashInvalid();
+    urlInput.focus();
+    return;
+  }
+  urlInput.value = url;
+  lastUrl = url;
+
+  // Snapshot whether the previous run had ended — the rate-limit transition
+  // below clobbers termState, and proceedStart needs this to decide whether
+  // to reuse the existing WS or open a new one.
+  var wasTerminal = termState === 'done' || termState === 'error';
+
+  // Ask the Worker to check the rate limit BEFORE we do anything else.
+  // 200 → proceed; 429 → show a cool-down message and bail.
+  btn.disabled = true;
+  setState('running', 'Checking rate limit...');
+  fetch('/xxd/start', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ url: url }),
+  }).then(function(resp) {
+    return resp.json().then(function(data) { return { status: resp.status, data: data }; });
+  }).then(function(r) {
+    if (r.status === 200) return proceedStart(url, wasTerminal);
+    var msg = (r.data && r.data.message) || 'Rate limit exceeded. Please try again later.';
+    resetUI();
+    appendLine('error', '\u2717 ' + msg, false);
+    setState('error', 'Rate limited');
+    btn.disabled = false;
+    btn.textContent = 'Run again\u2753';
+  }).catch(function(err) {
+    setState('error', 'Pre-check failed');
+    appendLine('error', '\u2717 Could not reach /xxd/start: ' + err.message, false);
+    btn.disabled = false;
+  });
+}
+
+function proceedStart(url, wasTerminal) {
+  // Already ran (or errored)? Tell the server to start over with the current URL.
+  if (wasTerminal && activeWs && activeWs.readyState === 1) {
+    resetUI();
+    setState('running', 'Restarting xxd...');
+    activeWs.send(JSON.stringify({ type: 'start', url: url }));
+    return;
+  }
+
+  retryCount = 0;
+  resetUI();
+  setState('running', 'Connecting to container...');
+  connect();
+}
