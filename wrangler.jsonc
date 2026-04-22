@@ -9,7 +9,7 @@
       "class_name": "Xxd",
       "image": "./Dockerfile",
       "instance_type": "standard-3",
-      "max_instances": 20
+      "max_instances": 500
     }
   ],
 
