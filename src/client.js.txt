@@ -33,9 +33,24 @@ function setState(s, label) {
 // reload on mismatch so a new deploy always gets a fresh container.
 var bootVid = (document.querySelector('meta[name="xxd-vid"]') || {}).content || '';
 
+// Persist the URL across refreshes / accidental tab closes. localStorage may
+// be unavailable (private mode, quota, disabled cookies), so guard every call.
+var URL_STORAGE_KEY = 'xxd-last-url';
+function persistUrl() {
+  try {
+    var v = urlInput.value;
+    if (v) localStorage.setItem(URL_STORAGE_KEY, v);
+    else   localStorage.removeItem(URL_STORAGE_KEY);
+  } catch (_) {}
+}
+try {
+  var savedUrl = localStorage.getItem(URL_STORAGE_KEY);
+  if (savedUrl && !urlInput.value) urlInput.value = savedUrl;
+} catch (_) {}
+
 // Keep the Run button in sync with the URL input: disabled while empty.
 function syncBtn() { btn.disabled = !urlInput.value.trim(); }
-urlInput.addEventListener('input', syncBtn);
+urlInput.addEventListener('input', function() { syncBtn(); persistUrl(); });
 syncBtn();
 
 // If the previous page detected a version bump and reloaded, pick up the URL
@@ -275,6 +290,7 @@ function start() {
     return;
   }
   urlInput.value = url;
+  persistUrl();
   lastUrl = url;
 
   // Snapshot whether the previous run had ended — the rate-limit transition

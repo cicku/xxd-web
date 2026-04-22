@@ -17,6 +17,21 @@ h1 {
 }
 h1 a          { color: #f38020; text-decoration: none }
 h1 a:hover    { text-decoration: underline }
+.hint {
+  color: #888;
+  font-size: .8rem;
+  margin-bottom: .75rem;
+  width: min(780px, 95%);
+  text-align: center;
+}
+.hint code {
+  background: #1a1a1a;
+  color: #ccc;
+  padding: 0 .25rem;
+  border-radius: 3px;
+  font-family: inherit;
+  font-size: .75rem;
+}
 #status {
   color: #888;
   margin-bottom: 1rem;
