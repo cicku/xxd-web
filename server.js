@@ -86,9 +86,9 @@ function classify(name) {
   return { kind: "plain" };
 }
 
-// True for any IP literal we should never dial — loopback, RFC1918, CGNAT,
-// link-local, IPv6 ULA, multicast, etc. Run both on URL hosts up front and
-// on whatever IP curl actually resolved to (catches DNS rebinding).
+// True for any IP literal we should never dial: loopback, RFC1918, CGNAT,
+// link-local, IPv6 ULA, multicast. Applied both to URL hosts and to whatever
+// curl resolved to, so DNS rebinding is caught too.
 function isPrivateIp(raw) {
   if (!raw) return false;
   const ip = String(raw).trim().replace(/^\[|\]$/g, "").toLowerCase();
@@ -122,9 +122,8 @@ function isBlockedHost(host) {
       || h.endsWith(".internal");   // k8s / GCP
 }
 
-// Filenames come from untrusted URLs, so we shell-safe them here rather than
-// trusting every downstream quoter. The regex keeps alnum + "._-" and throws
-// everything else away; bare dots become "download" to avoid writing to /ext/.
+// Clean up a filename pulled from a URL. Keeps alnum + "._-", drops everything
+// else, and replaces bare dots so we don't try to write to /ext/ or /ext/..
 function safeName(raw) {
   const n = raw.replace(/[^A-Za-z0-9._-]/g, "_").slice(0, 200);
   return (!n || n === "." || n === "..") ? "download" : n;
@@ -208,11 +207,11 @@ function dumpStderr(buf) {
   }
 }
 
-// Run a shell command and resolve with trimmed stdout. On non-zero exit we
-// reject with an Error carrying the exit code and stderr tail — most CLIs put
-// the real diagnostic there. Chunks are concat'd once at close so we don't
-// quadratically grow a rope, and multi-byte UTF-8 across chunk boundaries
-// decodes cleanly.
+// Run a shell command and resolve with trimmed stdout. Non-zero exit rejects
+// with an Error whose `stderr` is the captured tail (most CLIs put the real
+// diagnostic there). Chunks are joined once at close, which avoids repeated
+// string concatenation and decodes multi-byte UTF-8 correctly even when a
+// code point straddles two reads.
 function captureCmd(cmd, args) {
   return new Promise((resolve, reject) => {
     const proc = spawn(cmd, args);
@@ -230,18 +229,18 @@ function captureCmd(cmd, args) {
   });
 }
 
-// Data center this container is running in — injected by the Containers
-// runtime alongside CLOUDFLARE_REGION / CLOUDFLARE_COUNTRY_A2. Diagnostic use.
+// Data center the container is running in, for diagnostic logs. Injected by
+// the Containers runtime.
 const COLO = process.env.CLOUDFLARE_LOCATION || "unknown";
 
-// Control chars stripped + length-capped before interpolating user input into
-// a log line. Keeps newline-based log injection out of Observability.
+// Strip control chars and cap the length before logging user input. Guards
+// against log injection via newlines in URLs, JA4 strings, etc.
 function tailSafe(s) {
   return String(s == null ? "" : s).replace(/[\x00-\x1f\x7f]/g, "?").slice(0, 2000);
 }
 
-// Which IP did curl resolve? Used only for diagnostic logging on probe
-// failures, so "unknown" is fine on error.
+// Ask curl which IP a URL resolved to. Used for diagnostic logging only, so
+// "unknown" on any error is fine.
 async function resolveIp(url) {
   try {
     return await captureCmd("curl", [
@@ -260,19 +259,14 @@ function humanBytes(n) {
   return (i === 0 ? n.toFixed(0) : n.toFixed(2)) + " " + u[i];
 }
 
-// We pass --write-out on the same stdout stream as -D (header dump), so we
-// need a marker curl's writeout prepends that no real header line can match.
+// curl's -D (header dump) and --write-out both go to stdout. Use a marker
+// we know no header line will match so we can split them apart after capture.
 const META_SENTINEL = "\n__XXD_META__:";
 
-// Probe size + Content-Type without downloading, and return the IP curl
-// actually connected to. HEAD first; fall back to a 1-byte ranged GET for
-// servers that refuse HEAD or omit Content-Length on it. Protocol is locked
-// to http/https on both the initial request and any redirect, so no redirect
-// can pivot us to file://, gopher://, dict:// and friends.
-//
-// Throws on a fully failed probe, or when the resolved IP is in a private
-// range (the canonical SSRF signal: user supplied a hostname that points at
-// internal infra, or tried a rebinding trick).
+// Size + Content-Type probe. HEAD first, then a 1-byte ranged GET as a
+// fallback for servers that reject HEAD. curl is pinned to http(s) on the
+// initial request and on redirects. Throws when the resolved IP is private
+// (SSRF) or when every attempt failed at the network layer.
 async function probeResource(url) {
   const common = [
     "--max-time", "15", "--max-redirs", "10",
@@ -286,7 +280,7 @@ async function probeResource(url) {
   ];
 
   let lastErr = null;
-  let errStatus = null;        // last 4xx/5xx — only surfaced if nothing ever succeeded
+  let errStatus = null;        // last 4xx/5xx, surfaced only if nothing succeeded
   let sawOk = false;
   let contentType = null;
   let ip = null;
@@ -339,12 +333,10 @@ async function probeResource(url) {
   return { size: null, contentType, ip };
 }
 
-// Keep only the tail of a captured stream. bsdtar -v on a 10k-entry archive
-// would otherwise grow a multi-hundred-MB string just so badArchive() can
-// grep the last few lines for an error phrase.
-//
-// Chunks go in as-is (O(1) push) and we only drop from the front once we
-// cross 2*BUF_CAP. The join+slice happens once, on the error path.
+// Keep only the tail of a captured stream. Without this, bsdtar -v on a
+// 10k-entry archive would balloon a multi-hundred-MB string that badArchive()
+// only ever looks at the last few lines of. Chunks push in, oldest drop off
+// once we cross 2 * BUF_CAP, and the string is materialised only on error.
 const BUF_CAP = 64 * 1024;
 function createCappedBuf() {
   const chunks = [];
@@ -377,10 +369,9 @@ function runCmd(label, cmd, args, streamType = "stdout") {
     const stdoutBuf = createCappedBuf();
     const stderrBuf = createCappedBuf();
 
-    // Pipe chunks land at ~64 KiB boundaries, so a single line often straddles
-    // two reads. Hold the trailing partial in `leftover` until we see its \n;
-    // flush it on stream end. Skipping this tears lines in the UI and multiplies
-    // the xterm/JSON.stringify/send cost for every client.
+    // OS pipe reads land at ~64 KiB boundaries and a log line often straddles
+    // two of them. Hold the trailing partial in `leftover` until we see its \n,
+    // and flush it on stream end. Otherwise lines tear in the UI.
     function relay(stream, type, buf) {
       let leftover = "";
       stream.on("data", (chunk) => {
@@ -533,8 +524,8 @@ async function osInfo() {
 
 let currentPaths = null;
 
-// Recursive directory walk → flat list of regular file paths. Async so a
-// 10k-entry extract tree doesn't stall WS pings and concurrent stdout relays.
+// Recursive directory walk; returns regular files only. Async so a 10k-entry
+// tree doesn't block the event loop.
 async function walkFiles(dir) {
   const out = [];
   for (const entry of await fsp.readdir(dir, { withFileTypes: true })) {
@@ -551,9 +542,8 @@ function isNested(name) {
   return classify(name).kind !== "plain";
 }
 
-// Nuke an output directory and recreate it empty. Async because removing a
-// previous extract tree of thousands of files is otherwise the worst blocking
-// call in the process.
+// Nuke a directory and recreate it empty. Async so we don't block the loop
+// tearing down a previous extract of thousands of files.
 async function freshDir(dir) {
   try { await fsp.rm(dir, { recursive: true, force: true }); } catch (_) {}
   await fsp.mkdir(dir, { recursive: true });
@@ -594,9 +584,9 @@ async function runXxd(url) {
         " limit. Please choose a smaller file and try again.");
     }
 
-    // Pin the destination IP to whatever the probe saw, and refuse redirects
-    // outright — the probe already followed them. Together this closes the
-    // DNS-rebinding / round-robin window between probe and fetch.
+    // Pin the IP to whatever the probe saw, and refuse redirects. The probe
+    // already followed them, and this closes the DNS-rebinding window between
+    // probe and fetch.
     const curlArgs = ["-v", "-o", file, "--proto", "=http,https", "--max-redirs", "0"];
     if (ip) curlArgs.push("--resolve", host + ":" + port + ":" + ip);
     curlArgs.push("--", url);
@@ -862,8 +852,7 @@ async function resetXxd() {
   currentPaths = null;
   if (!paths) return;
 
-  // Best-effort cleanup; run in parallel so a huge extract tree doesn't
-  // serialise with the single-file unlink.
+  // Best-effort cleanup, in parallel so the rm doesn't serialise with unlink.
   await Promise.all([
     fsp.unlink(paths.file).catch(() => {}),
     fsp.rm(paths.extractDir, { recursive: true, force: true }).catch(() => {}),

@@ -60,9 +60,9 @@ function getCookie(req, name) {
   return m ? m[1] : null;
 }
 
-// Browsers always send Origin on POST and WS upgrade, so strict same-origin
-// is enough to keep a third-party page from riding the visitor's IP to fire
-// downloads (CSRF on /start, WS-hijack on /ws).
+// Strict same-origin check, used to guard /start (CSRF) and the /ws upgrade
+// (hijack). Browsers always send Origin on both, so a missing header counts
+// as a fail.
 function isSameOrigin(request, url) {
   const origin = request.headers.get("Origin");
   return !!origin && origin === url.protocol + "//" + url.host;
@@ -75,8 +75,8 @@ async function sha256Hex(str) {
   return hex.join("");
 }
 
-// Control chars stripped + length-capped before interpolating user input into
-// a log line. Keeps newline-based log injection out of Observability.
+// Strip control chars and cap the length before logging user input. Guards
+// against log injection via newlines in URLs, JA4 strings, etc.
 function tailSafe(s) {
   return String(s == null ? "" : s).replace(/[\x00-\x1f\x7f]/g, "?").slice(0, 2000);
 }
@@ -232,9 +232,9 @@ export default {
         headers: { "Set-Cookie": "sid=; Max-Age=0; Path=/xxd; SameSite=Strict; HttpOnly; Secure" } });
     }
 
-    // Rate-limit pre-check. Client POSTs the target URL here before opening
-    // the WebSocket; we refuse early if the visitor has exceeded the limit
-    // for this particular (ip, ja4, url) combination in the last 10 minutes.
+    // Pre-flight for the WS upgrade: origin check, rate limit, container
+    // warmup. Folding the warmup in here means capacity errors come back as a
+    // readable 503 instead of an opaque WS handshake failure.
     if (path === "/start" && request.method === "POST") {
       if (!isSameOrigin(request, url)) {
         console.log("start-forbidden: ip=" + tailSafe(ip) +
@@ -247,25 +247,41 @@ export default {
       if (!targetUrl) return json({ error: "missing url" }, 400);
 
       const rl = await rateLimit(env.XXD_RL, ip, ja4, targetUrl);
-      if (!rl.blocked) return json({ ok: true, count: rl.count });
+      if (rl.blocked) {
+        console.log("rate-limit block: ip=" + tailSafe(ip) + ", ja4=" + tailSafe(ja4) +
+          ", url=" + tailSafe(targetUrl) + ", count=" + rl.count +
+          ", retryAfter=" + rl.retryAfter + "s, sid=" + sid);
+        return json({
+          error: "rate_limited", limit: RL_LIMIT, window: RL_WINDOW, retryAfter: rl.retryAfter,
+          message: "You've submitted this URL " + rl.count + " times in the last " +
+            Math.ceil(RL_WINDOW / 60) + " minutes. Please cool down for " +
+            Math.ceil(rl.retryAfter / 60) + " more minute(s) before trying again.",
+        }, 429, { "Retry-After": String(rl.retryAfter) });
+      }
 
-      console.log("rate-limit block: ip=" + tailSafe(ip) + ", ja4=" + tailSafe(ja4) +
-        ", url=" + tailSafe(targetUrl) + ", count=" + rl.count +
-        ", retryAfter=" + rl.retryAfter + "s, sid=" + sid);
-      return json({
-        error: "rate_limited", limit: RL_LIMIT, window: RL_WINDOW, retryAfter: rl.retryAfter,
-        message: "You've submitted this URL " + rl.count + " times in the last " +
-          Math.ceil(RL_WINDOW / 60) + " minutes. Please cool down for " +
-          Math.ceil(rl.retryAfter / 60) + " more minute(s) before trying again.",
-      }, 429, { "Retry-After": String(rl.retryAfter) });
+      // Warm up (or re-use) the container. If starting would exceed
+      // max_instances, container.fetch throws and we turn that into a 503.
+      const probe = new URL(request.url);
+      probe.pathname = "/ping";
+      try {
+        await container.fetch(new Request(probe, { method: "GET" }));
+      } catch (err) {
+        console.log("at-capacity: ip=" + tailSafe(ip) + ", sid=" + sid +
+          ", err=" + tailSafe(err && err.message));
+        return json({
+          error: "at_capacity",
+          message: "Service is at capacity right now. Please try again in a minute.",
+        }, 503, { "Retry-After": "60" });
+      }
+
+      return json({ ok: true, count: rl.count });
     }
 
-    // Proxy WebSocket + health check to the container. URL rewrite so
-    // the container sees `/ws` or `/ping` — it stays oblivious to the public
-    // `/xxd/...` access point. /ws needs a same-origin guard (a third-party
-    // page could otherwise open a WS, send {type:"start", url:...}, and ride
-    // the visitor's IP straight past /start's rate-limit); /ping is a plain
-    // health probe and stays open for tooling that won't send Origin.
+    // Proxy WebSocket + health check to the container. Path is rewritten so
+    // the container sees /ws or /ping rather than /xxd/ws or /xxd/ping.
+    // /ws gets the same-origin guard so a third-party page can't open a WS
+    // and send its own {type:"start", url:...} past the rate limit. /ping is
+    // left open for health-check tooling that won't send Origin.
     if (path === "/ws" || path === "/ping") {
       if (path === "/ws" && !isSameOrigin(request, url)) {
         console.log("ws-forbidden: ip=" + tailSafe(ip) +

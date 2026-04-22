@@ -282,8 +282,12 @@ function start() {
   // to reuse the existing WS or open a new one.
   var wasTerminal = termState === 'done' || termState === 'error';
 
-  // Ask the Worker to check the rate limit BEFORE we do anything else.
-  // 200 → proceed; 429 → show a cool-down message and bail.
+  // Pre-flight before opening the WS. Any failure here comes back as a real
+  // JSON body we can surface to the user, rather than as an opaque WS failure.
+  //   200 → proceed
+  //   429 → rate-limit cool-down
+  //   503 → container pool at capacity
+  //   other → generic start failure
   btn.disabled = true;
   setState('running', 'Checking rate limit...');
   fetch('/xxd/start', {
@@ -294,10 +298,13 @@ function start() {
     return resp.json().then(function(data) { return { status: resp.status, data: data }; });
   }).then(function(r) {
     if (r.status === 200) return proceedStart(url, wasTerminal);
-    var msg = (r.data && r.data.message) || 'Rate limit exceeded. Please try again later.';
+    var label = r.status === 429 ? 'Rate limited'
+              : r.status === 503 ? 'At capacity'
+              : 'Start failed';
+    var msg = (r.data && r.data.message) || 'Request failed. Please try again later.';
     resetUI();
     appendLine('error', '\u2717 ' + msg, false);
-    setState('error', 'Rate limited');
+    setState('error', label);
     btn.disabled = false;
     btn.textContent = 'Run again\u2753';
   }).catch(function(err) {

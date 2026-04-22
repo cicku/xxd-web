@@ -1,13 +1,13 @@
 {
   "name": "xxd-web",
-  "version": "1.7",
+  "version": "1.8",
   "private": true,
   "scripts": {
     "dev": "wrangler dev",
     "deploy": "wrangler deploy --tag v$npm_package_version"
   },
   "dependencies": {
-    "@cloudflare/containers": "^0.3.0"
+    "@cloudflare/containers": "^0.3.3"
   },
   "devDependencies": {
     "wrangler": "^4.83.0"

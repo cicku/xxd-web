@@ -5,6 +5,8 @@ colored hex dump in the browser. Built w/ Cloudflare Workers + Workers KV + Cont
 
 Live demo: <https://demo.cicku.me/xxd>
 
+[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/cicku/xxd-web/)
+
 ## How it works
 
 1. The Worker (`src/xxd.js`) serves the page, HMACs a session id
@@ -64,6 +66,7 @@ Route: `demo.cicku.me/xxd*` (set in `wrangler.jsonc`).
 - **10 GiB**
 - **3 requests per 10 minutes**
 - Archives with passwords or corruption are skipped.
+- `sid` rotation can exhaust the predefined container quantity limit, right now the issue is ignored because of the demo purpose. 
 
 ## License
 
